@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 TARGET = Path("/private/var/db/os_eligibility/eligibility.plist")
 APP = Path("/System/Applications/iPhone Mirroring.app")
 APP_EXECUTABLE = APP / "Contents/MacOS/iPhone Mirroring"
@@ -1084,8 +1084,20 @@ def classify_logs(text: str) -> List[str]:
     messages = []
     lower = text.lower()
     lines = [line.lower() for line in text.splitlines()]
-    phone_region_locked = "sfauthenticationerrorcoderegionlocked" in lower or (
-        "remoteauthenticationerror" in lower and "code=14" in lower
+    sharing_auth_code_35 = any(
+        "com.apple.sharing.authentication" in line
+        and re.search(r"\bcode\s*=\s*35\b", line)
+        for line in lines
+    )
+    sharing_auth_code_10 = any(
+        "com.apple.sharing.authentication" in line
+        and re.search(r"\bcode\s*=\s*10\b", line)
+        for line in lines
+    )
+    phone_region_locked = (
+        "sfauthenticationerrorcoderegionlocked" in lower
+        or ("remoteauthenticationerror" in lower and "code=14" in lower)
+        or sharing_auth_code_35
     )
     mac_passed = any(
         "device is eligible for iphone mirroring" in line
@@ -1105,6 +1117,11 @@ def classify_logs(text: str) -> List[str]:
     )
     mac_query_failed = any("failed to get eligibility answer" in line for line in lines)
     mac_check_started = any("checking if mac is eligible" in line for line in lines)
+    mac_check_progressed = mac_check_started and any(
+        "1.3 checking if mac is restricted" in line
+        or "2. checking if icloud is signed in" in line
+        for line in lines
+    )
     generic_region_error = "not available in your country or region" in lower
 
     if mac_passed:
@@ -1113,15 +1130,29 @@ def classify_logs(text: str) -> List[str]:
         messages.append("The log explicitly says the Mac-side eligibility check failed.")
     if mac_query_failed:
         messages.append("The Mac could not obtain an eligibility answer.")
+    if mac_check_progressed and not (mac_passed or mac_failed or mac_query_failed):
+        messages.append(
+            "The launch progressed beyond the Mac-side eligibility check; no failure was "
+            "logged at step 1.2."
+        )
     if phone_region_locked:
         messages.append(
-            "Phone-side region lock detected. The Mac plist patch cannot override the iPhone handshake."
+            "Phone-side region lock detected (sharing authentication code 35). "
+            "The Mac plist patch cannot override the iPhone handshake."
+        )
+    if sharing_auth_code_10:
+        messages.append(
+            "Remote unlock authentication failed with SFAuthenticationErrorCodeInternal "
+            "(sharing authentication code 10), not the region-lock code 35. Reset the "
+            "iPhone Mirroring pairing and retry before changing eligibility."
         )
     if generic_region_error and not phone_region_locked:
         messages.append(
             "A region error is present, but the captured lines do not identify which device rejected it."
         )
-    if mac_check_started and not (mac_passed or mac_failed or mac_query_failed):
+    if mac_check_started and not (
+        mac_passed or mac_failed or mac_query_failed or mac_check_progressed
+    ):
         messages.append(
             "The Mac eligibility check started, but the captured log contains no pass/fail result."
         )
@@ -1147,6 +1178,10 @@ def command_diagnose(args: argparse.Namespace) -> int:
         'eventMessage CONTAINS[c] "RemoteAuthenticationError" OR '
         'eventMessage CONTAINS[c] "remote device threw an error" OR '
         'eventMessage CONTAINS[c] "Failed to trust paired iPhone" OR '
+        'eventMessage CONTAINS[c] "com.apple.sharing.authentication" OR '
+        'eventMessage CONTAINS[c] "Unlock failed with error internalError" OR '
+        'eventMessage CONTAINS[c] "AKSSession" OR '
+        'eventMessage CONTAINS[c] "LocalLTK" OR '
         'eventMessage CONTAINS[c] "eligible for iPhone Mirroring" OR '
         'eventMessage CONTAINS[c] "eligibility answer" OR '
         'eventMessage CONTAINS[c] "Checking if Mac is eligible" OR '

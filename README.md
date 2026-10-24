@@ -124,7 +124,8 @@ Each write has a separate identifier. After `apply`, the program prints the exac
 ## Interpreting diagnostic results
 
 - `Mac-side IRON state: eligible` means that the three known Mac-side values are set correctly.
-- `Phone-side region lock detected` means that the iPhone rejected authentication. Further changes to `eligibility.plist` on the Mac will not resolve it.
+- `Phone-side region lock detected` or sharing authentication code `35` means that the iPhone rejected authentication with `SFAuthenticationErrorCodeRegionLocked`. Further changes to `eligibility.plist` on the Mac will not resolve it.
+- Sharing authentication code `10` means `SFAuthenticationErrorCodeInternal`, not `RegionLocked`. Restart both devices and reset only the iPhone Mirroring pairing before changing accounts or eligibility data.
 - If the file remains inaccessible with `sudo`, the Terminal application usually lacks Full Disk Access.
 - An immutable flag probably remains from another tool. This helper does not remove it automatically.
 - If a guarded launch is terminated with `SIGKILL` or by sudden power loss, `uchg` may remain because no process can run cleanup. Use the exact emergency command printed before the operation; `doctor` will also flag the remaining immutable state.
@@ -137,7 +138,7 @@ The tool addresses only the known Mac-side restriction. It does not change the A
 
 ### Observed macOS 27.2 and iOS 27 behavior
 
-In a live test on macOS 27.2, the guarded mode kept the Mac-side `IRON` patch active through repeated eligibility checks. No Mac-side `answer: 2` failure appeared until after the guard was cleared and the original file was restored. The application still displayed the regional-availability error while the guard was active, with a US Media & Purchases account on the iPhone. This isolates the remaining refusal to a later eligibility or pairing gate; changing the App Store account alone did not unlock iPhone Mirroring.
+In a live test on macOS 27.2, the guarded mode kept the Mac-side `IRON` patch active through repeated eligibility checks. No Mac-side `answer: 2` failure appeared until after the guard was cleared and the original file was restored. With a US Media & Purchases account on the iPhone, a synchronized Mac-and-iPhone trace showed that the iPhone passed its local eligibility and restriction stages, accepted the screen session, reached `readyForUnlock`, and then returned sharing authentication code `10` during the LTK/AKS remote-unlock exchange. Apple's local symbol maps code `10` to `SFAuthenticationErrorCodeInternal`; the region-lock value is code `35`. Therefore this captured run did not prove a phone-side region lock. It exposed a separate pairing/authentication failure, while still showing that changing the App Store account alone did not produce a working session.
 
 Apple evaluates features through separate eligibility domains and policies. A configuration that enables an Apple Intelligence or Siri feature does not establish eligibility for the `IRON` domain used by iPhone Mirroring. The exact iPhone-side inputs are not exposed by this Mac-side tool.
 

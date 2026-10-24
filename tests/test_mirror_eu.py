@@ -189,10 +189,36 @@ class MirrorEuTests(unittest.TestCase):
         self.assertTrue(any("Phone-side" in message for message in messages))
         self.assertTrue(any("Mac-side" in message for message in messages))
 
+    def test_log_classification_recognizes_redacted_region_code(self):
+        messages = mirror_eu.classify_logs(
+            "Error Domain=com.apple.sharing.authentication Code=35 "
+            "UserInfo={NSDebugDescription=<private>}"
+        )
+        self.assertTrue(any("region lock" in message for message in messages))
+
+    def test_log_classification_distinguishes_internal_auth_error(self):
+        messages = mirror_eu.classify_logs(
+            "Error Domain=com.apple.sharing.authentication Code=10 "
+            "UserInfo={NSDebugDescription=<private>}\n"
+            'Unlock failed with error internalError(deviceName: "iPhone")'
+        )
+        self.assertTrue(any("SFAuthenticationErrorCodeInternal" in message for message in messages))
+        self.assertTrue(any("not the region-lock code 35" in message for message in messages))
+        self.assertFalse(any("Phone-side region lock detected" in message for message in messages))
+
     def test_log_check_start_is_not_reported_as_a_pass(self):
         messages = mirror_eu.classify_logs("1.2 Checking if Mac is eligible")
         self.assertTrue(any("no pass/fail result" in message for message in messages))
         self.assertFalse(any("explicitly says" in message for message in messages))
+
+    def test_log_classification_reports_progress_beyond_mac_check(self):
+        messages = mirror_eu.classify_logs(
+            "1.2 Checking if Mac is eligible\n"
+            "1.3 Checking if Mac is restricted by profile\n"
+            "2. Checking if iCloud is signed in"
+        )
+        self.assertTrue(any("progressed beyond" in message for message in messages))
+        self.assertFalse(any("no pass/fail result" in message for message in messages))
 
     def test_log_classification_reports_explicit_mac_failure(self):
         messages = mirror_eu.classify_logs(
