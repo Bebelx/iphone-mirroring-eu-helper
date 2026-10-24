@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "0.1.1"
+VERSION = "0.1.3"
 TARGET = Path("/private/var/db/os_eligibility/eligibility.plist")
 APP = Path("/System/Applications/iPhone Mirroring.app")
 APP_EXECUTABLE = APP / "Contents/MacOS/iPhone Mirroring"
@@ -48,7 +48,9 @@ MAX_PLIST_SIZE = 4 * 1024 * 1024
 MAX_MANIFEST_SIZE = 256 * 1024
 BACKUP_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-IMMUTABLE_FLAGS = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0)
+USER_IMMUTABLE_FLAG = getattr(stat, "UF_IMMUTABLE", 0)
+SYSTEM_IMMUTABLE_FLAG = getattr(stat, "SF_IMMUTABLE", 0)
+IMMUTABLE_FLAGS = USER_IMMUTABLE_FLAG | SYSTEM_IMMUTABLE_FLAG
 TRANSIENT_XATTRS = frozenset(("com.apple.provenance",))
 
 
@@ -349,6 +351,72 @@ def require_matching_metadata(expected: Metadata, actual: Metadata, message: str
     differences = metadata_differences(expected, actual)
     if differences:
         raise ToolError("%s: %s" % (message, "; ".join(differences)))
+
+
+def metadata_with_flags(metadata: Metadata, flags: int) -> Metadata:
+    return Metadata(
+        uid=metadata.uid,
+        gid=metadata.gid,
+        mode=metadata.mode,
+        flags=flags,
+        xattrs=metadata.xattrs,
+        acl=metadata.acl,
+    )
+
+
+def set_temporary_user_immutable(
+    path: Path, expected_raw: bytes, expected_metadata: Metadata
+) -> None:
+    """Set only UF_IMMUTABLE after verifying exact content and metadata."""
+    if not USER_IMMUTABLE_FLAG:
+        raise ToolError("This macOS Python runtime does not expose UF_IMMUTABLE.")
+    if expected_metadata.flags & IMMUTABLE_FLAGS:
+        raise ToolError("Refusing to stack a temporary guard on an immutable file.")
+    if read_file_secure(path, MAX_PLIST_SIZE) != expected_raw:
+        raise ToolError("eligibility.plist changed before the temporary guard was set.")
+    require_matching_metadata(
+        expected_metadata,
+        capture_metadata(path),
+        "eligibility.plist metadata changed before the temporary guard was set",
+    )
+    guarded_flags = expected_metadata.flags | USER_IMMUTABLE_FLAG
+    try:
+        os.chflags(str(path), guarded_flags, follow_symlinks=False)
+    except OSError as exc:
+        raise ToolError(
+            "Could not set the temporary user-immutable guard: %s"
+            % (exc.strerror or exc)
+        ) from exc
+    fsync_directory(path.parent)
+    require_matching_metadata(
+        metadata_with_flags(expected_metadata, guarded_flags),
+        capture_metadata(path),
+        "Temporary user-immutable guard verification failed",
+    )
+    if read_file_secure(path, MAX_PLIST_SIZE) != expected_raw:
+        raise ToolError("eligibility.plist changed while the temporary guard was being set.")
+
+
+def clear_temporary_user_immutable(path: Path) -> bool:
+    """Clear only UF_IMMUTABLE, preserving every other observed property."""
+    current = capture_metadata(path)
+    if not current.flags & USER_IMMUTABLE_FLAG:
+        return False
+    cleared_flags = current.flags & ~USER_IMMUTABLE_FLAG
+    try:
+        os.chflags(str(path), cleared_flags, follow_symlinks=False)
+    except OSError as exc:
+        raise ToolError(
+            "Could not clear the temporary user-immutable guard: %s"
+            % (exc.strerror or exc)
+        ) from exc
+    fsync_directory(path.parent)
+    require_matching_metadata(
+        metadata_with_flags(current, cleared_flags),
+        capture_metadata(path),
+        "Temporary user-immutable guard cleanup verification failed",
+    )
+    return True
 
 
 def fsync_file(descriptor: int) -> None:
@@ -826,13 +894,19 @@ def command_launch(args: argparse.Namespace) -> int:
     require_macos()
     snapshot = read_target()
     updated = print_plan(snapshot, "temporary launch")
+    if args.guard_recompute:
+        print(
+            "Temporary recompute guard: set user-immutable (uchg) only while the app starts, "
+            "then clear it before restoration"
+        )
+        print("SIP and the system-immutable flag: untouched")
     if args.dry_run:
         print("DRY RUN: no backup, write or app launch was performed.")
         return 0
     require_root()
     if app_is_running():
         raise ToolError("Quit iPhone Mirroring fully before temporary launch.")
-    confirm("LAUNCH", args.yes)
+    confirm("LOCKED-LAUNCH" if args.guard_recompute else "LAUNCH", args.yes)
     if not changes_for(snapshot):
         open_mirroring_app()
         print("App opened; the plist was already eligible and was not changed.")
@@ -841,19 +915,35 @@ def command_launch(args: argparse.Namespace) -> int:
     previous_handlers = install_signal_interrupts()
     backup_id = ""
     patch_attempted = False
+    guard_attempted = False
     restore_message = ""
     interrupted = None
     try:
         with operation_lock():
             snapshot = read_target()
             updated = patched_bytes(snapshot)
-            backup_id = create_backup(snapshot, "temporary-launch")
+            backup_reason = (
+                "temporary-launch-guarded" if args.guard_recompute else "temporary-launch"
+            )
+            backup_id = create_backup(snapshot, backup_reason)
+            print("Verified backup id:", backup_id, flush=True)
+            if args.guard_recompute:
+                print(
+                    "Emergency recovery: sudo chflags nouchg %s && "
+                    "sudo ./mirror-eu restore --backup %s" % (TARGET, backup_id),
+                    flush=True,
+                )
             try:
                 patch_attempted = True
                 atomic_replace_preserving_metadata(
                     snapshot.raw, updated, target=TARGET, expected_metadata=snapshot.metadata
                 )
                 print("Temporary patch verified. Backup id:", backup_id)
+                if args.guard_recompute:
+                    guard_attempted = True
+                    patched_metadata = capture_metadata(TARGET)
+                    set_temporary_user_immutable(TARGET, updated, patched_metadata)
+                    print("Temporary user-immutable guard set and verified.")
                 open_mirroring_app()
                 print("iPhone Mirroring opened; holding the patch for %.1f seconds." % args.hold_seconds)
                 try:
@@ -861,13 +951,26 @@ def command_launch(args: argparse.Namespace) -> int:
                 except InterruptedError as exc:
                     interrupted = exc
             finally:
+                cleanup_errors = []
+                if guard_attempted:
+                    try:
+                        if clear_temporary_user_immutable(TARGET):
+                            print("Temporary user-immutable guard cleared and verified.")
+                    except ToolError as exc:
+                        cleanup_errors.append(str(exc))
                 if patch_attempted:
-                    restored, restore_message = safe_restore_if_unchanged(snapshot, updated)
-                    if not restored:
-                        raise ToolError(
-                            "%s Use 'restore --backup %s' after reviewing the current state."
-                            % (restore_message, backup_id)
-                        )
+                    try:
+                        restored, restore_message = safe_restore_if_unchanged(snapshot, updated)
+                        if not restored:
+                            cleanup_errors.append(restore_message)
+                    except ToolError as exc:
+                        cleanup_errors.append(str(exc))
+                if cleanup_errors:
+                    raise ToolError(
+                        "Cleanup did not complete: %s. Emergency recovery: "
+                        "sudo chflags nouchg %s && sudo ./mirror-eu restore --backup %s"
+                        % ("; ".join(cleanup_errors), TARGET, backup_id)
+                    )
     finally:
         restore_signal_handlers(previous_handlers)
     print(restore_message)
@@ -980,18 +1083,48 @@ def command_backups(_args: argparse.Namespace) -> int:
 def classify_logs(text: str) -> List[str]:
     messages = []
     lower = text.lower()
-    if "sfauthenticationerrorcoderegionlocked" in lower or (
+    lines = [line.lower() for line in text.splitlines()]
+    phone_region_locked = "sfauthenticationerrorcoderegionlocked" in lower or (
         "remoteauthenticationerror" in lower and "code=14" in lower
-    ):
+    )
+    mac_passed = any(
+        "device is eligible for iphone mirroring" in line
+        or (
+            "eligible for iphone mirroring" in line
+            and "ineligible" not in line
+            and "not eligible" not in line
+            and "checking" not in line
+            and "check if" not in line
+        )
+        for line in lines
+    )
+    mac_failed = any(
+        "device is ineligible for iphone mirroring" in line
+        or "not eligible for iphone mirroring" in line
+        for line in lines
+    )
+    mac_query_failed = any("failed to get eligibility answer" in line for line in lines)
+    mac_check_started = any("checking if mac is eligible" in line for line in lines)
+    generic_region_error = "not available in your country or region" in lower
+
+    if mac_passed:
+        messages.append("The log explicitly says the Mac-side eligibility check passed.")
+    if mac_failed:
+        messages.append("The log explicitly says the Mac-side eligibility check failed.")
+    if mac_query_failed:
+        messages.append("The Mac could not obtain an eligibility answer.")
+    if phone_region_locked:
         messages.append(
             "Phone-side region lock detected. The Mac plist patch cannot override the iPhone handshake."
         )
-    if "device is eligible for iphone mirroring" in lower:
-        messages.append("The log says the Mac-side eligibility check passed.")
-    if "mac is eligible" in lower and "fail" not in lower:
-        messages.append("The log contains a passing Mac eligibility check.")
-    if "not available in your country or region" in lower and not messages:
-        messages.append("A region error is present, but the available lines do not identify which device rejected it.")
+    if generic_region_error and not phone_region_locked:
+        messages.append(
+            "A region error is present, but the captured lines do not identify which device rejected it."
+        )
+    if mac_check_started and not (mac_passed or mac_failed or mac_query_failed):
+        messages.append(
+            "The Mac eligibility check started, but the captured log contains no pass/fail result."
+        )
     if not messages:
         messages.append("No recognized iPhone Mirroring eligibility error was found in this time window.")
     return messages
@@ -1012,8 +1145,11 @@ def command_diagnose(args: argparse.Namespace) -> int:
     predicate = (
         'eventMessage CONTAINS[c] "RegionLocked" OR '
         'eventMessage CONTAINS[c] "RemoteAuthenticationError" OR '
-        'eventMessage CONTAINS[c] "Device is eligible for iPhone Mirroring" OR '
-        'eventMessage CONTAINS[c] "Mac is eligible" OR '
+        'eventMessage CONTAINS[c] "remote device threw an error" OR '
+        'eventMessage CONTAINS[c] "Failed to trust paired iPhone" OR '
+        'eventMessage CONTAINS[c] "eligible for iPhone Mirroring" OR '
+        'eventMessage CONTAINS[c] "eligibility answer" OR '
+        'eventMessage CONTAINS[c] "Checking if Mac is eligible" OR '
         'eventMessage CONTAINS[c] "not available in your country or region"'
     )
     result = run_command(
@@ -1022,6 +1158,8 @@ def command_diagnose(args: argparse.Namespace) -> int:
             "show",
             "--last",
             "%dm" % args.minutes,
+            "--info",
+            "--debug",
             "--style",
             "compact",
             "--predicate",
@@ -1058,10 +1196,11 @@ def command_menu(_args: argparse.Namespace) -> int:
         print("1. Compatibility check (read-only)")
         print("2. Temporary launch dry-run (read-only)")
         print("3. Temporary patch, launch and automatic restore")
-        print("4. Persistent Mac-side enable")
-        print("5. Restore latest backup")
-        print("6. Diagnose recent Mirroring errors (read-only)")
-        print("7. Show Mac-side eligibility status (read-only)")
+        print("4. Temporary launch with a short recompute guard")
+        print("5. Persistent Mac-side enable")
+        print("6. Restore latest backup")
+        print("7. Diagnose recent Mirroring errors (read-only)")
+        print("8. Show Mac-side eligibility status (read-only)")
         print("Q. Quit")
         choice = input("Choose: ").strip().lower()
         if choice in ("q", "quit", ""):
@@ -1073,12 +1212,14 @@ def command_menu(_args: argparse.Namespace) -> int:
         elif choice == "3":
             menu_subprocess(["launch"], sudo=True)
         elif choice == "4":
-            menu_subprocess(["apply"], sudo=True)
+            menu_subprocess(["launch", "--guard-recompute"], sudo=True)
         elif choice == "5":
-            menu_subprocess(["restore", "--backup", "latest"], sudo=True)
+            menu_subprocess(["apply"], sudo=True)
         elif choice == "6":
-            menu_subprocess(["diagnose"])
+            menu_subprocess(["restore", "--backup", "latest"], sudo=True)
         elif choice == "7":
+            menu_subprocess(["diagnose"])
+        elif choice == "8":
             menu_subprocess(["status"])
         else:
             print("Unknown choice.")
@@ -1102,6 +1243,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch.add_argument("--dry-run", action="store_true", help="show the exact plan without writing")
     launch.add_argument("--yes", action="store_true", help="treat this command invocation as confirmation")
+    launch.add_argument(
+        "--guard-recompute",
+        action="store_true",
+        help="temporarily set the user-immutable flag while the app starts",
+    )
     launch.add_argument(
         "--hold-seconds",
         type=float,

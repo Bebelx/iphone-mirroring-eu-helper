@@ -127,6 +127,27 @@ class MirrorEuTests(unittest.TestCase):
         differences = mirror_eu.metadata_differences(expected, actual)
         self.assertEqual(differences, ("changed xattrs=com.example.required",))
 
+    def test_temporary_user_immutable_guard_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target, raw = self.make_target(directory)
+            before = mirror_eu.capture_metadata(target)
+            mirror_eu.set_temporary_user_immutable(target, raw, before)
+            guarded = mirror_eu.capture_metadata(target)
+            self.assertTrue(guarded.flags & mirror_eu.USER_IMMUTABLE_FLAG)
+            self.assertEqual(target.read_bytes(), raw)
+            self.assertTrue(mirror_eu.clear_temporary_user_immutable(target))
+            after = mirror_eu.capture_metadata(target)
+            self.assertEqual(mirror_eu.metadata_differences(before, after), ())
+            self.assertEqual(target.read_bytes(), raw)
+
+    def test_temporary_user_immutable_guard_rejects_changed_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target, raw = self.make_target(directory)
+            before = mirror_eu.capture_metadata(target)
+            with self.assertRaises(mirror_eu.ToolError):
+                mirror_eu.set_temporary_user_immutable(target, raw + b"changed", before)
+            self.assertFalse(target.lstat().st_flags & mirror_eu.USER_IMMUTABLE_FLAG)
+
     def test_concurrent_content_change_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             target, raw = self.make_target(directory)
@@ -168,11 +189,27 @@ class MirrorEuTests(unittest.TestCase):
         self.assertTrue(any("Phone-side" in message for message in messages))
         self.assertTrue(any("Mac-side" in message for message in messages))
 
+    def test_log_check_start_is_not_reported_as_a_pass(self):
+        messages = mirror_eu.classify_logs("1.2 Checking if Mac is eligible")
+        self.assertTrue(any("no pass/fail result" in message for message in messages))
+        self.assertFalse(any("explicitly says" in message for message in messages))
+
+    def test_log_classification_reports_explicit_mac_failure(self):
+        messages = mirror_eu.classify_logs(
+            "Device is ineligible for iPhone Mirroring due to answer: 2"
+        )
+        self.assertEqual(
+            messages,
+            ["The log explicitly says the Mac-side eligibility check failed."],
+        )
+
     def test_temporary_launch_restores_when_app_open_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             target, _ = self.make_target(directory)
             snapshot = mirror_eu.read_target(target)
-            args = SimpleNamespace(dry_run=False, yes=True, hold_seconds=5.0)
+            args = SimpleNamespace(
+                dry_run=False, yes=True, hold_seconds=5.0, guard_recompute=False
+            )
             restored = mock.Mock(return_value=(True, "restored"))
             with mock.patch.object(mirror_eu, "TARGET", target), mock.patch.object(
                 mirror_eu, "require_macos"
@@ -202,10 +239,64 @@ class MirrorEuTests(unittest.TestCase):
                         mirror_eu.command_launch(args)
             restored.assert_called_once()
 
+    def test_guarded_launch_clears_guard_before_restore_on_open_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target, _ = self.make_target(directory)
+            snapshot = mirror_eu.read_target(target)
+            args = SimpleNamespace(
+                dry_run=False, yes=True, hold_seconds=5.0, guard_recompute=True
+            )
+            events = []
+            confirmation = mock.Mock()
+            clear_guard = mock.Mock(side_effect=lambda _target: events.append("clear") or True)
+            restored = mock.Mock(
+                side_effect=lambda *_args: events.append("restore") or (True, "restored")
+            )
+            with mock.patch.object(mirror_eu, "TARGET", target), mock.patch.object(
+                mirror_eu, "require_macos"
+            ), mock.patch.object(mirror_eu, "require_root"), mock.patch.object(
+                mirror_eu, "read_target", return_value=snapshot
+            ), mock.patch.object(mirror_eu, "app_is_running", return_value=False), mock.patch.object(
+                mirror_eu, "confirm", confirmation
+            ), mock.patch.object(
+                mirror_eu, "install_signal_interrupts", return_value={}
+            ), mock.patch.object(
+                mirror_eu, "restore_signal_handlers"
+            ), mock.patch.object(
+                mirror_eu, "operation_lock", return_value=mock.MagicMock(
+                    __enter__=mock.Mock(return_value=None), __exit__=mock.Mock(return_value=False)
+                )
+            ), mock.patch.object(
+                mirror_eu, "create_backup", return_value="20261024T120000Z-abcdef"
+            ), mock.patch.object(
+                mirror_eu, "atomic_replace_preserving_metadata"
+            ), mock.patch.object(
+                mirror_eu, "set_temporary_user_immutable"
+            ), mock.patch.object(
+                mirror_eu, "clear_temporary_user_immutable", clear_guard
+            ), mock.patch.object(
+                mirror_eu, "open_mirroring_app", side_effect=mirror_eu.ToolError("open failed")
+            ), mock.patch.object(
+                mirror_eu, "safe_restore_if_unchanged", restored
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(mirror_eu.ToolError):
+                        mirror_eu.command_launch(args)
+            confirmation.assert_called_once_with("LOCKED-LAUNCH", True)
+            clear_guard.assert_called_once_with(target)
+            restored.assert_called_once()
+            self.assertEqual(events, ["clear", "restore"])
+
     def test_parser_rejects_unexpected_hold_time(self):
         parser = mirror_eu.build_parser()
         args = parser.parse_args(["launch", "--hold-seconds", "5"])
         self.assertEqual(args.hold_seconds, 5.0)
+
+    def test_parser_accepts_explicit_recompute_guard(self):
+        parser = mirror_eu.build_parser()
+        args = parser.parse_args(["launch", "--guard-recompute", "--dry-run"])
+        self.assertTrue(args.guard_recompute)
+        self.assertTrue(args.dry_run)
 
 
 if __name__ == "__main__":

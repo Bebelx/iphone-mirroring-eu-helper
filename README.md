@@ -15,14 +15,14 @@ For that reason, this project does not import location-spoofing code, restart `l
 ## Safety features
 
 - `doctor`, `status`, `diagnose`, and every `--dry-run` operation are read-only.
-- Commands that write data require `sudo` and the exact confirmation word `LAUNCH`, `ENABLE`, or `RESTORE`.
+- Commands that write data require `sudo` and the exact confirmation word `LAUNCH`, `LOCKED-LAUNCH`, `ENABLE`, or `RESTORE`.
 - Before any write, the tool creates a private backup of the complete file and a manifest containing its SHA-256 checksum.
 - Changes are written to a temporary file in the same directory, then installed with an atomic `replace` operation.
 - Ownership, group, mode, flags, ACLs, and source extended attributes are copied and compared before and after the write. The system-managed `com.apple.provenance` marker is excluded from equality because macOS can attach it automatically to a new inode.
 - The operation stops if the file is changed concurrently.
 - Restoring a complete file from a different macOS build is blocked.
 - Temporary mode restores the original file after launching the application, including after `Ctrl-C`, `SIGTERM`, or a Terminal window closed with `SIGHUP`.
-- The tool does not disable SIP, set an immutable flag, install a LaunchDaemon, run a persistent loop, or add a login item.
+- The tool does not disable SIP, set the system-immutable flag, install a LaunchDaemon, run a persistent loop, or add a login item. The optional `--guard-recompute` mode sets only the user-immutable flag (`uchg`) for a few seconds, then clears and verifies it before restoration.
 
 ## Requirements
 
@@ -56,6 +56,14 @@ For `launch`, the tool displays the exact plan and proceeds only after you enter
 
 This is the recommended first approach. The application may remain open after the file is restored.
 
+If diagnostics explicitly report `Device is ineligible ... answer: 2` immediately after a verified patch, macOS recomputed the value before the application read it. In that case, preview the optional short guard:
+
+```sh
+./mirror-eu launch --guard-recompute --dry-run
+```
+
+The guarded operation requires the separate confirmation word `LOCKED-LAUNCH`. It temporarily sets `uchg` only while the application starts, clears and verifies the flag, and then restores the original file. The backup identifier and an emergency recovery command are printed before the patch is applied.
+
 ## Commands
 
 ```sh
@@ -70,6 +78,12 @@ This is the recommended first approach. The application may remain open after th
 
 # Apply a temporary change, launch the application, and restore automatically
 sudo ./mirror-eu launch
+
+# Preview the short recompute guard without making changes
+./mirror-eu launch --guard-recompute --dry-run
+
+# Prevent eligibilityd from replacing the patch only while the app starts
+sudo ./mirror-eu launch --guard-recompute
 
 # Apply a persistent change after confirmation; macOS may recalculate it later
 sudo ./mirror-eu apply
@@ -113,12 +127,19 @@ Each write has a separate identifier. After `apply`, the program prints the exac
 - `Phone-side region lock detected` means that the iPhone rejected authentication. Further changes to `eligibility.plist` on the Mac will not resolve it.
 - If the file remains inaccessible with `sudo`, the Terminal application usually lacks Full Disk Access.
 - An immutable flag probably remains from another tool. This helper does not remove it automatically.
+- If a guarded launch is terminated with `SIGKILL` or by sudden power loss, `uchg` may remain because no process can run cleanup. Use the exact emergency command printed before the operation; `doctor` will also flag the remaining immutable state.
 
 ## Limitations
 
 This tool relies on an undocumented macOS file and may stop working after a system update. It checks for macOS 27.2 and the expected schema, but a complete connection cannot be verified without the specific iPhone and its account and region state.
 
 The tool addresses only the known Mac-side restriction. It does not change the Apple Account, App Store country, iPhone region, IP address, GPS location, or the response signed by the iPhone during pairing.
+
+### Observed macOS 27.2 and iOS 27 behavior
+
+In a live test on macOS 27.2, the guarded mode kept the Mac-side `IRON` patch active through repeated eligibility checks. No Mac-side `answer: 2` failure appeared until after the guard was cleared and the original file was restored. The application still displayed the regional-availability error while the guard was active, with a US Media & Purchases account on the iPhone. This isolates the remaining refusal to a later eligibility or pairing gate; changing the App Store account alone did not unlock iPhone Mirroring.
+
+Apple evaluates features through separate eligibility domains and policies. A configuration that enables an Apple Intelligence or Siri feature does not establish eligibility for the `IRON` domain used by iPhone Mirroring. The exact iPhone-side inputs are not exposed by this Mac-side tool.
 
 ## Tests
 
@@ -134,5 +155,6 @@ The test suite uses temporary files only:
 - [Pauli1Go/iphone-mirroring-eu-enabler](https://github.com/Pauli1Go/iphone-mirroring-eu-enabler), Apache-2.0
 - [TimBitBox/mac-location-spoofer](https://github.com/TimBitBox/mac-location-spoofer), MIT
 - [nxm/iphone-mirroring-bypass: separate Mac and iPhone checks in iOS 26](https://github.com/nxm/iphone-mirroring-bypass)
+- [The Apple Wiki: eligibility domains and input signals](https://theapplewiki.com/wiki/Eligibility)
 
 Sources last reviewed on October 24, 2026. This project is not affiliated with Apple.
