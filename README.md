@@ -18,7 +18,7 @@ For that reason, this project does not import location-spoofing code, restart `l
 - Commands that write data require `sudo` and the exact confirmation word `LAUNCH`, `ENABLE`, or `RESTORE`.
 - Before any write, the tool creates a private backup of the complete file and a manifest containing its SHA-256 checksum.
 - Changes are written to a temporary file in the same directory, then installed with an atomic `replace` operation.
-- Ownership, group, mode, flags, ACLs, and extended attributes are copied and compared before and after the write.
+- Ownership, group, mode, flags, ACLs, and source extended attributes are copied and compared before and after the write. The system-managed `com.apple.provenance` marker is excluded from equality because macOS can attach it automatically to a new inode.
 - The operation stops if the file is changed concurrently.
 - Restoring a complete file from a different macOS build is blocked.
 - Temporary mode restores the original file after launching the application, including after `Ctrl-C`, `SIGTERM`, or a Terminal window closed with `SIGHUP`.

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 TARGET = Path("/private/var/db/os_eligibility/eligibility.plist")
 APP = Path("/System/Applications/iPhone Mirroring.app")
 APP_EXECUTABLE = APP / "Contents/MacOS/iPhone Mirroring"
@@ -49,6 +49,7 @@ MAX_MANIFEST_SIZE = 256 * 1024
 BACKUP_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 IMMUTABLE_FLAGS = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0)
+TRANSIENT_XATTRS = frozenset(("com.apple.provenance",))
 
 
 class ToolError(RuntimeError):
@@ -295,6 +296,61 @@ def metadata_summary(metadata: Metadata) -> str:
     )
 
 
+def metadata_differences(expected: Metadata, actual: Metadata) -> Tuple[str, ...]:
+    """Return security-relevant metadata differences without exposing values.
+
+    macOS can attach com.apple.provenance to a newly created inode even when
+    the source has no such attribute. It is system-managed tracking metadata,
+    not a permission or an eligibility input, so it is excluded from equality.
+    Every other extended attribute remains part of the strict comparison.
+    """
+    differences = []
+    scalar_fields = (
+        ("uid", expected.uid, actual.uid, "%d"),
+        ("gid", expected.gid, actual.gid, "%d"),
+        ("mode", expected.mode, actual.mode, "%04o"),
+        ("flags", expected.flags, actual.flags, "%d"),
+    )
+    for label, wanted, observed, formatting in scalar_fields:
+        if wanted != observed:
+            differences.append(
+                "%s expected=%s actual=%s"
+                % (label, formatting % wanted, formatting % observed)
+            )
+
+    if expected.acl != actual.acl:
+        differences.append(
+            "ACL entries expected=%d actual=%d" % (len(expected.acl), len(actual.acl))
+        )
+
+    expected_xattrs = {
+        name: value for name, value in expected.xattrs if name not in TRANSIENT_XATTRS
+    }
+    actual_xattrs = {
+        name: value for name, value in actual.xattrs if name not in TRANSIENT_XATTRS
+    }
+    missing = sorted(set(expected_xattrs) - set(actual_xattrs))
+    unexpected = sorted(set(actual_xattrs) - set(expected_xattrs))
+    changed = sorted(
+        name
+        for name in set(expected_xattrs) & set(actual_xattrs)
+        if expected_xattrs[name] != actual_xattrs[name]
+    )
+    if missing:
+        differences.append("missing xattrs=" + ",".join(missing))
+    if unexpected:
+        differences.append("unexpected xattrs=" + ",".join(unexpected))
+    if changed:
+        differences.append("changed xattrs=" + ",".join(changed))
+    return tuple(differences)
+
+
+def require_matching_metadata(expected: Metadata, actual: Metadata, message: str) -> None:
+    differences = metadata_differences(expected, actual)
+    if differences:
+        raise ToolError("%s: %s" % (message, "; ".join(differences)))
+
+
 def fsync_file(descriptor: int) -> None:
     os.fsync(descriptor)
     full_sync = getattr(fcntl, "F_FULLFSYNC", None)
@@ -337,8 +393,10 @@ def atomic_replace_preserving_metadata(
     """Atomically replace target while retaining its permission metadata.
 
     A same-directory staged copy made by macOS cp -p carries ownership, mode,
-    flags, ACLs and extended attributes. Every relevant property is compared
-    before and after replacement. Concurrent content changes abort the write.
+    flags, ACLs and extended attributes. Every security-relevant property is
+    compared before and after replacement. macOS-managed provenance tracking
+    is allowed to differ because the OS can add it to every new inode.
+    Concurrent content changes abort the write.
     """
     if parse_plist(replacement_raw, "replacement plist") is None:
         raise AssertionError("unreachable")
@@ -351,8 +409,11 @@ def atomic_replace_preserving_metadata(
     if current != expected_raw:
         raise ToolError("eligibility.plist changed before the write; no replacement was made.")
     current_metadata = capture_metadata(target)
-    if current_metadata != source_metadata:
-        raise ToolError("eligibility.plist metadata changed before the write; no replacement was made.")
+    require_matching_metadata(
+        source_metadata,
+        current_metadata,
+        "eligibility.plist metadata changed before the write; no replacement was made",
+    )
 
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".%s.mirror-eu-" % target.name, dir=str(target.parent)
@@ -363,8 +424,11 @@ def atomic_replace_preserving_metadata(
         run_command(["/bin/cp", "-p", str(target), str(temporary)])
         if read_file_secure(temporary, MAX_PLIST_SIZE) != expected_raw:
             raise ToolError("Staged copy verification failed; target was not changed.")
-        if capture_metadata(temporary) != source_metadata:
-            raise ToolError("Staged permission metadata differs; target was not changed.")
+        require_matching_metadata(
+            source_metadata,
+            capture_metadata(temporary),
+            "Staged permission metadata differs; target was not changed",
+        )
 
         flags = os.O_WRONLY | os.O_TRUNC | O_NOFOLLOW
         staged_descriptor = os.open(str(temporary), flags)
@@ -378,8 +442,11 @@ def atomic_replace_preserving_metadata(
 
         if read_file_secure(temporary, MAX_PLIST_SIZE) != replacement_raw:
             raise ToolError("Staged content verification failed; target was not changed.")
-        if capture_metadata(temporary) != source_metadata:
-            raise ToolError("Permission metadata changed during staging; target was not changed.")
+        require_matching_metadata(
+            source_metadata,
+            capture_metadata(temporary),
+            "Permission metadata changed during staging; target was not changed",
+        )
         if read_file_secure(target, MAX_PLIST_SIZE) != expected_raw:
             raise ToolError("eligibility.plist changed concurrently; target was not replaced.")
 
@@ -387,8 +454,11 @@ def atomic_replace_preserving_metadata(
         fsync_directory(target.parent)
         if read_file_secure(target, MAX_PLIST_SIZE) != replacement_raw:
             raise ToolError("Post-write content verification failed.")
-        if capture_metadata(target) != source_metadata:
-            raise ToolError("Post-write permission metadata verification failed.")
+        require_matching_metadata(
+            source_metadata,
+            capture_metadata(target),
+            "Post-write permission metadata verification failed",
+        )
     finally:
         try:
             temporary.unlink()

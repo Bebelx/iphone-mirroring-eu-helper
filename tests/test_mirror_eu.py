@@ -88,6 +88,45 @@ class MirrorEuTests(unittest.TestCase):
             self.assertEqual(mirror_eu.capture_metadata(target), before)
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
 
+    def test_system_managed_provenance_is_not_a_permission_mismatch(self):
+        expected = mirror_eu.Metadata(
+            uid=0,
+            gid=297,
+            mode=0o644,
+            flags=0,
+            xattrs=(),
+            acl=(),
+        )
+        actual = mirror_eu.Metadata(
+            uid=0,
+            gid=297,
+            mode=0o644,
+            flags=0,
+            xattrs=(("com.apple.provenance", b"\x01\x02"),),
+            acl=(),
+        )
+        self.assertEqual(mirror_eu.metadata_differences(expected, actual), ())
+
+    def test_other_extended_attribute_changes_are_rejected(self):
+        expected = mirror_eu.Metadata(
+            uid=0,
+            gid=297,
+            mode=0o644,
+            flags=0,
+            xattrs=(("com.example.required", b"original"),),
+            acl=(),
+        )
+        actual = mirror_eu.Metadata(
+            uid=0,
+            gid=297,
+            mode=0o644,
+            flags=0,
+            xattrs=(("com.example.required", b"changed"),),
+            acl=(),
+        )
+        differences = mirror_eu.metadata_differences(expected, actual)
+        self.assertEqual(differences, ("changed xattrs=com.example.required",))
+
     def test_concurrent_content_change_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             target, raw = self.make_target(directory)

@@ -53,7 +53,7 @@ Odczyt zawartości `eligibility.plist` został poprawnie zablokowany przez TCC, 
 
 ## Decyzja projektowa
 
-Helper dotyka wyłącznie trzech istniejących kluczy `IRON`. `CESIUM`, Core Location i wszystkie pozostałe domeny pozostają bez zmian. Brak domeny, brak klucza, inny typ wartości, nieznany format, symlink, flaga immutable, zmiana równoległa albo rozbieżność metadanych powodują odmowę zapisu.
+Helper dotyka wyłącznie trzech istniejących kluczy `IRON`. `CESIUM`, Core Location i wszystkie pozostałe domeny pozostają bez zmian. Brak domeny, brak klucza, inny typ wartości, nieznany format, symlink, flaga immutable, zmiana równoległa albo rozbieżność istotnych metadanych powodują odmowę zapisu. Systemowy znacznik `com.apple.provenance`, który macOS może automatycznie dopisać do nowego inode, jest raportowany, ale nie jest traktowany jako uprawnienie ani wejście eligibility.
 
 Domyślną drogą jest krótkotrwałe `launch`: patch → uruchomienie aplikacji → dokładne przywrócenie. `apply` istnieje jako świadoma opcja trwała, ale nie instaluje pętli ani flagi immutable. To ogranicza skutki uboczne i pozostawia systemowi możliwość normalnego przeliczenia eligibility.
 
