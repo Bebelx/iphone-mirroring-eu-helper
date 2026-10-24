@@ -206,6 +206,26 @@ class MirrorEuTests(unittest.TestCase):
         self.assertTrue(any("not the region-lock code 35" in message for message in messages))
         self.assertFalse(any("Phone-side region lock detected" in message for message in messages))
 
+    def test_log_classification_reports_confirmed_aks_session(self):
+        messages = mirror_eu.classify_logs(
+            "Creating AKSSession with flags: <private>\n"
+            "Confirm aksSession: <private>\n"
+            "End AKSSession: <private>"
+        )
+        self.assertTrue(any("confirmed remote-unlock AKSSession" in message for message in messages))
+        self.assertFalse(any("mixed results" in message for message in messages))
+
+    def test_log_classification_separates_retry_failure_from_confirmed_session(self):
+        messages = mirror_eu.classify_logs(
+            "Confirm aksSession: <private>\n"
+            "Device is ineligible for iPhone Mirroring due to answer: 2\n"
+            "Error Domain=com.apple.sharing.authentication Code=10\n"
+            "Error Domain=com.apple.sharing.authentication Code=33"
+        )
+        self.assertTrue(any("mixed results" in message for message in messages))
+        self.assertTrue(any("separate attempt" in message for message in messages))
+        self.assertTrue(any("transient" in message for message in messages))
+
     def test_log_check_start_is_not_reported_as_a_pass(self):
         messages = mirror_eu.classify_logs("1.2 Checking if Mac is eligible")
         self.assertTrue(any("no pass/fail result" in message for message in messages))

@@ -64,6 +64,14 @@ If diagnostics explicitly report `Device is ineligible ... answer: 2` immediatel
 
 The guarded operation requires the separate confirmation word `LOCKED-LAUNCH`. It temporarily sets `uchg` only while the application starts, clears and verifies the flag, and then restores the original file. The backup identifier and an emergency recovery command are printed before the patch is applied.
 
+For a first pairing or a fresh reconnection, allow enough time to complete the prompts while the temporary state is active:
+
+```sh
+sudo ./mirror-eu launch --guard-recompute --hold-seconds 30
+```
+
+After the original file has been restored, an already established Mirroring session can continue. Unlocking the iPhone ends that session. If pressing **Retry** then performs a new eligibility check and fails, quit iPhone Mirroring and run a new temporary launch instead of repeatedly pressing Retry.
+
 ## Commands
 
 ```sh
@@ -126,6 +134,7 @@ Each write has a separate identifier. After `apply`, the program prints the exac
 - `Mac-side IRON state: eligible` means that the three known Mac-side values are set correctly.
 - `Phone-side region lock detected` or sharing authentication code `35` means that the iPhone rejected authentication with `SFAuthenticationErrorCodeRegionLocked`. Further changes to `eligibility.plist` on the Mac will not resolve it.
 - Sharing authentication code `10` means `SFAuthenticationErrorCodeInternal`, not `RegionLocked`. Restart both devices and reset only the iPhone Mirroring pairing before changing accounts or eligibility data.
+- `At least one attempt reached a confirmed remote-unlock AKSSession` means that authentication progressed successfully in at least one attempt. If the same diagnostic window also contains errors, the report labels it as mixed results instead of treating a later Retry failure as the result of the successful session.
 - If the file remains inaccessible with `sudo`, the Terminal application usually lacks Full Disk Access.
 - An immutable flag probably remains from another tool. This helper does not remove it automatically.
 - If a guarded launch is terminated with `SIGKILL` or by sudden power loss, `uchg` may remain because no process can run cleanup. Use the exact emergency command printed before the operation; `doctor` will also flag the remaining immutable state.
@@ -138,7 +147,9 @@ The tool addresses only the known Mac-side restriction. It does not change the A
 
 ### Observed macOS 27.2 and iOS 27 behavior
 
-In a live test on macOS 27.2, the guarded mode kept the Mac-side `IRON` patch active through repeated eligibility checks. No Mac-side `answer: 2` failure appeared until after the guard was cleared and the original file was restored. With a US Media & Purchases account on the iPhone, a synchronized Mac-and-iPhone trace showed that the iPhone passed its local eligibility and restriction stages, accepted the screen session, reached `readyForUnlock`, and then returned sharing authentication code `10` during the LTK/AKS remote-unlock exchange. Apple's local symbol maps code `10` to `SFAuthenticationErrorCodeInternal`; the region-lock value is code `35`. Therefore this captured run did not prove a phone-side region lock. It exposed a separate pairing/authentication failure, while still showing that changing the App Store account alone did not produce a working session.
+In a live test on macOS 27.2, the guarded mode kept the Mac-side `IRON` patch active through repeated eligibility checks. An initial trace reached the phone and then returned sharing authentication code `10` during the LTK/AKS remote-unlock exchange. Apple's local symbol maps code `10` to `SFAuthenticationErrorCodeInternal`; the region-lock value is code `35`, which was not present.
+
+After removing the old iPhone Mirroring pairing and restarting both devices, a 30-second guarded launch completed first-time setup and displayed the iPhone normally. The helper then cleared `uchg`, restored the original plist and verified it while the active Mirroring session continued. Unlocking the iPhone ended the session as expected. Pressing Retry after restoration caused a new check against the original `answer: 2` state and failed; this was a separate attempt, not a failure of the already confirmed session. This confirms that the temporary Mac-side method can establish Mirroring without Core Location spoofing or disabling SIP, but a fresh launch or reconnection may require running the helper again.
 
 Apple evaluates features through separate eligibility domains and policies. A configuration that enables an Apple Intelligence or Siri feature does not establish eligibility for the `IRON` domain used by iPhone Mirroring. The exact iPhone-side inputs are not exposed by this Mac-side tool.
 

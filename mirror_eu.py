@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 TARGET = Path("/private/var/db/os_eligibility/eligibility.plist")
 APP = Path("/System/Applications/iPhone Mirroring.app")
 APP_EXECUTABLE = APP / "Contents/MacOS/iPhone Mirroring"
@@ -977,6 +977,10 @@ def command_launch(args: argparse.Namespace) -> int:
     if interrupted is not None:
         raise ToolError("Temporary launch was interrupted after restoration.")
     print("The app can remain open; no helper plist patch remains.")
+    print(
+        "If a later Retry rechecks eligibility and fails, quit the app and run a new "
+        "temporary launch."
+    )
     return 0
 
 
@@ -1094,6 +1098,12 @@ def classify_logs(text: str) -> List[str]:
         and re.search(r"\bcode\s*=\s*10\b", line)
         for line in lines
     )
+    sharing_auth_code_33 = any(
+        "com.apple.sharing.authentication" in line
+        and re.search(r"\bcode\s*=\s*33\b", line)
+        for line in lines
+    )
+    aks_confirmed = any("confirm akssession" in line for line in lines)
     phone_region_locked = (
         "sfauthenticationerrorcoderegionlocked" in lower
         or ("remoteauthenticationerror" in lower and "code=14" in lower)
@@ -1124,10 +1134,28 @@ def classify_logs(text: str) -> List[str]:
     )
     generic_region_error = "not available in your country or region" in lower
 
+    mixed_attempts = aks_confirmed and (
+        mac_failed or phone_region_locked or sharing_auth_code_10 or sharing_auth_code_33
+    )
+
+    if aks_confirmed:
+        messages.append(
+            "At least one attempt reached a confirmed remote-unlock AKSSession."
+        )
+    if mixed_attempts:
+        messages.append(
+            "This time window contains mixed results from more than one attempt; "
+            "do not treat a later retry error as the outcome of the confirmed session."
+        )
     if mac_passed:
         messages.append("The log explicitly says the Mac-side eligibility check passed.")
     if mac_failed:
-        messages.append("The log explicitly says the Mac-side eligibility check failed.")
+        if aks_confirmed:
+            messages.append(
+                "A separate attempt explicitly failed the Mac-side eligibility check."
+            )
+        else:
+            messages.append("The log explicitly says the Mac-side eligibility check failed.")
     if mac_query_failed:
         messages.append("The Mac could not obtain an eligibility answer.")
     if mac_check_progressed and not (mac_passed or mac_failed or mac_query_failed):
@@ -1141,11 +1169,28 @@ def classify_logs(text: str) -> List[str]:
             "The Mac plist patch cannot override the iPhone handshake."
         )
     if sharing_auth_code_10:
-        messages.append(
-            "Remote unlock authentication failed with SFAuthenticationErrorCodeInternal "
-            "(sharing authentication code 10), not the region-lock code 35. Reset the "
-            "iPhone Mirroring pairing and retry before changing eligibility."
-        )
+        if aks_confirmed:
+            messages.append(
+                "A separate attempt logged SFAuthenticationErrorCodeInternal "
+                "(sharing authentication code 10), not the region-lock code 35."
+            )
+        else:
+            messages.append(
+                "Remote unlock authentication failed with SFAuthenticationErrorCodeInternal "
+                "(sharing authentication code 10), not the region-lock code 35. Reset the "
+                "iPhone Mirroring pairing and retry before changing eligibility."
+            )
+    if sharing_auth_code_33:
+        if aks_confirmed:
+            messages.append(
+                "Sharing authentication code 33 also occurred, but the confirmed AKSSession "
+                "shows it was transient or belonged to another attempt."
+            )
+        else:
+            messages.append(
+                "Sharing authentication code 33 occurred. It is not the region-lock code 35, "
+                "and the redacted log does not identify its cause."
+            )
     if generic_region_error and not phone_region_locked:
         messages.append(
             "A region error is present, but the captured lines do not identify which device rejected it."
@@ -1231,7 +1276,7 @@ def command_menu(_args: argparse.Namespace) -> int:
         print("1. Compatibility check (read-only)")
         print("2. Temporary launch dry-run (read-only)")
         print("3. Temporary patch, launch and automatic restore")
-        print("4. Temporary launch with a short recompute guard")
+        print("4. Guarded launch for first setup or reconnection (30 seconds)")
         print("5. Persistent Mac-side enable")
         print("6. Restore latest backup")
         print("7. Diagnose recent Mirroring errors (read-only)")
@@ -1247,7 +1292,9 @@ def command_menu(_args: argparse.Namespace) -> int:
         elif choice == "3":
             menu_subprocess(["launch"], sudo=True)
         elif choice == "4":
-            menu_subprocess(["launch", "--guard-recompute"], sudo=True)
+            menu_subprocess(
+                ["launch", "--guard-recompute", "--hold-seconds", "30"], sudo=True
+            )
         elif choice == "5":
             menu_subprocess(["apply"], sudo=True)
         elif choice == "6":
