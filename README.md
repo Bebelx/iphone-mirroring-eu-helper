@@ -1,5 +1,10 @@
 # iPhone Mirroring EU Helper
 
+[![Tests](https://github.com/Bebelx/iphone-mirroring-eu-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/Bebelx/iphone-mirroring-eu-helper/actions/workflows/ci.yml)
+
+> [!WARNING]
+> This is an experimental proof of concept built on undocumented macOS behavior. It requires administrator privileges for write operations, may stop working after an OS update, and has been live-tested on only one macOS 27.2/iOS 27 configuration. Run `doctor` and a dry run first, keep SIP enabled, and review the printed plan before confirming any write.
+
 A safer, reversible tool for checking and—after explicit confirmation—changing the **macOS-side** eligibility state for iPhone Mirroring. The project is designed with macOS 27.2 on Apple Silicon in mind, but it checks the actual system version, application, service, and property-list structure each time instead of assuming compatibility.
 
 ## Main conclusion from the analysis
@@ -155,11 +160,19 @@ Apple evaluates features through separate eligibility domains and policies. A co
 
 ## Tests
 
-The test suite uses temporary files only:
+The test suite uses temporary files and mocks only. It never writes the real system eligibility file:
 
 ```sh
 /usr/bin/python3 -m unittest discover -s tests -v
 ```
+
+GitHub Actions runs the same tests on macOS with Python 3.9 and 3.13. The workflow has read-only repository permissions and never invokes `sudo`, Full Disk Access, iPhone Mirroring, or a system integration test.
+
+## Security, privacy, and contributions
+
+Read [SECURITY.md](SECURITY.md) before reporting a problem. Never publish a raw `eligibility.plist`, helper backup, `.logarchive`, Apple Account address, serial number, UDID, token, password, or unredacted system log. The structured bug-report form asks only for bounded, redacted diagnostics.
+
+Development and pull-request rules are in [CONTRIBUTING.md](CONTRIBUTING.md). Release notes for the validated proof of concept are in [docs/releases/v0.1.5-poc.md](docs/releases/v0.1.5-poc.md).
 
 ## Sources
 

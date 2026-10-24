@@ -1,0 +1,118 @@
+name: Bug report
+description: Report a reproducible compatibility, launch, restoration, or diagnostic problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is an experimental proof of concept that modifies private macOS eligibility data.
+        Do not upload `eligibility.plist`, helper backups, a raw `.logarchive`, Apple Account addresses,
+        serial numbers, UDIDs, tokens, passwords, or unredacted logs.
+
+  - type: checkboxes
+    id: preparation
+    attributes:
+      label: Preparation
+      options:
+        - label: I read the README, ran `./mirror-eu doctor`, and previewed the operation with `--dry-run`.
+          required: true
+        - label: SIP remains enabled and I did not combine this helper with a Core Location spoofer.
+          required: true
+        - label: I removed or redacted account and device identifiers from the information below.
+          required: true
+
+  - type: input
+    id: helper-version
+    attributes:
+      label: Helper version
+      description: Paste the output of `./mirror-eu --version`.
+      placeholder: mirror_eu.py 0.1.5
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and build
+      description: Find both values with `sw_vers`.
+      placeholder: macOS 27.2, build 26B5101f
+    validations:
+      required: true
+
+  - type: input
+    id: ios
+    attributes:
+      label: iOS version and build
+      placeholder: iOS 27.x, build if known
+    validations:
+      required: true
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Mac architecture
+      options:
+        - Apple silicon (arm64)
+        - Intel Mac with T2 chip
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Operation
+      options:
+        - Read-only doctor or status
+        - Dry run
+        - Temporary launch
+        - Guarded temporary launch
+        - Persistent apply
+        - Restore
+        - Diagnose
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exact on-screen message, but remove identifiers.
+    validations:
+      required: true
+
+  - type: textarea
+    id: redacted-output
+    attributes:
+      label: Redacted diagnostic output
+      description: Prefer `./mirror-eu doctor` and `./mirror-eu diagnose --minutes 5 --show-lines`. Inspect the output before posting.
+      render: shell
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: State whether this was a first pairing, reconnect, or Retry after restoration.
+      placeholder: |
+        1. Quit iPhone Mirroring.
+        2. Run the guarded temporary launch.
+        3. Complete first pairing.
+        4. ...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: final-safety-check
+    attributes:
+      label: Final privacy check
+      options:
+        - label: I did not attach a raw plist, backup, logarchive, or unredacted system log.
+          required: true
